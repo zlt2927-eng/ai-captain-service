@@ -1,17 +1,17 @@
-"""Cart update tool for Gemini integration."""
+"""Cart update tool for Gemini integration - refactored with gateway."""
 
 import logging
 from typing import Any, Dict, Optional
 
-from app.infrastructure.http_client import HTTPClient, HTTPClientError
+from app.services.cart_backend_gateway import CartBackendGateway
 from app.schemas.cart_schemas import CartAction, CartUpdatePayload, CartAddonSelection
-from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
 
 async def update_cart(
-    http_client: HTTPClient,
+    cart_gateway: CartBackendGateway,
+    turn_id: str,
     restaurant_id: str,
     session_id: str,
     action: str,
@@ -20,56 +20,71 @@ async def update_cart(
     notes: Optional[str] = None,
     addons: Optional[list[dict]] = None,
 ) -> dict:
-    """Update user's cart via Laravel backend."""
+    """Update user's cart via CartBackendGateway.
+    
+    This tool is now a thin wrapper around the CartBackendGateway,
+    which handles idempotency, HTTP communication, and error handling.
+    
+    Args:
+        cart_gateway: Cart backend gateway instance
+        turn_id: Turn identifier for correlation and idempotency
+        restaurant_id: Restaurant identifier
+        session_id: Session identifier
+        action: Cart action (add/remove/update)
+        dish_id: Dish identifier
+        quantity: New quantity
+        notes: Optional special instructions
+        addons: Optional addon selections
+        
+    Returns:
+        Cart update result with success status and cart snapshot
+    """
     try:
+        # Validate addons if provided
         normalized_addons = []
         if addons:
             for addon in addons:
                 normalized_addons.append(
                     CartAddonSelection.model_validate(addon).model_dump()
                 )
-
-        payload = CartUpdatePayload.model_validate(
-            {
+        
+        logger.info(
+            "Updating cart via tool",
+            extra={
+                "turn_id": turn_id,
                 "restaurant_id": restaurant_id,
                 "session_id": session_id,
                 "action": action,
                 "dish_id": dish_id,
                 "quantity": quantity,
-                "notes": notes,
-                "addons": normalized_addons,
-                "source": "ai_captain",
             }
         )
-
-        settings = get_settings()
-        cart_url = settings.cart_update_url
-
-        logger.info(
-            "Updating cart for %s:%s action=%s dish_id=%s quantity=%s",
-            restaurant_id,
-            session_id,
-            action,
-            dish_id,
-            quantity,
+        
+        # Delegate to gateway (handles idempotency, HTTP, etc.)
+        result = await cart_gateway.update_cart(
+            session_id=session_id,
+            turn_id=turn_id,
+            restaurant_id=restaurant_id,
+            action=action,
+            dish_id=dish_id,
+            quantity=quantity,
+            notes=notes,
+            addons=normalized_addons,
         )
-
-        result = await http_client.post_json(cart_url, payload.model_dump())
-
-        success = bool(result.get("success", True))
-        cart_snapshot = result.get("cart", {}) if isinstance(result.get("cart", {}), dict) else {}
-        cart_event = result.get("cart_event") or payload.model_dump()
-
+        
+        # Transform gateway result to tool result format
         return {
-            "success": success,
+            "success": result.get("success", False),
             "message": result.get("message", "Cart updated"),
-            "cart": cart_snapshot,
-            "cart_event": cart_event,
-            "error": None if success else result.get("error", "Cart update failed"),
+            "cart": result.get("cart", {}),
+            "cart_event": result.get("cart_event", {}),
+            "error": result.get("error"),
+            "idempotency_key": result.get("idempotency_key"),
         }
-    except HTTPClientError as exc:
-        logger.error("Cart update HTTP failure", exc_info=True)
-        return {"success": False, "error": str(exc)}
+        
     except Exception as exc:
-        logger.error("Cart update failed", exc_info=True)
-        return {"success": False, "error": str(exc)}
+        logger.error("Cart tool execution failed", exc_info=True)
+        return {
+            "success": False,
+            "error": str(exc),
+        }
