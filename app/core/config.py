@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     # Gemini
     GEMINI_API_KEY: str
     GEMINI_MODEL: str = "gemini-1.5-flash"
+    TELEGRAM_BOT_TOKEN: str
 
     # Groq STT
     GROQ_API_KEY: str
@@ -67,7 +68,13 @@ class Settings(BaseSettings):
             return v
         return [origin.strip() for origin in v.split(",") if origin.strip()]
 
-    @field_validator("GEMINI_API_KEY", "GROQ_API_KEY", "ELEVENLABS_API_KEY", "WEBSOCKET_AUTH_SECRET")
+    @field_validator(
+        "GEMINI_API_KEY",
+        "TELEGRAM_BOT_TOKEN",
+        "GROQ_API_KEY",
+        "ELEVENLABS_API_KEY",
+        "WEBSOCKET_AUTH_SECRET",
+    )
     @classmethod
     def validate_secrets_not_empty(cls, v: str) -> str:
         """Ensure required secrets are not blank."""

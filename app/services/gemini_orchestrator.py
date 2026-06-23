@@ -210,3 +210,7 @@ class GeminiOrchestrator:
         except Exception as exc:
             logger.error("Gemini orchestration failed", exc_info=True)
             raise GeminiOrchestratorError("Orchestration failed") from exc
+
+    async def process_message(self, restaurant_id: str, session_id: str, user_message: str) -> dict:
+        """Alias for the public message processing entry point."""
+        return await self.process_user_message(restaurant_id, session_id, user_message)

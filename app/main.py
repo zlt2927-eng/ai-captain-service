@@ -5,6 +5,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.telegram_bot import initialize_telegram_bot, shutdown_telegram_bot
 from app.api.websocket_endpoints import router as websocket_router
 from app.core.config import get_settings
 from app.core.logging import setup_logging
@@ -57,11 +58,15 @@ def create_app() -> FastAPI:
         app.state.gemini_orchestrator = GeminiOrchestrator(settings, app.state.session_service, app.state.http_client)
         app.state.recovery_service = RecoveryService(settings, app.state.http_client, app.state.redis_client, app.state.session_service)
 
+        app.state.telegram_app = await initialize_telegram_bot(app)
         logger.info("All services initialized successfully")
 
     @app.on_event("shutdown")
     async def shutdown() -> None:
         logger.info("Shutting down %s", settings.APP_NAME)
+
+        if getattr(app.state, "telegram_app", None):
+            await shutdown_telegram_bot(app.state.telegram_app)
 
         if getattr(app.state, "http_client", None):
             await app.state.http_client.shutdown()
