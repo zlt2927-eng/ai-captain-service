@@ -1,7 +1,8 @@
 """Application configuration using Pydantic v2."""
 
+from functools import lru_cache
 from typing import Optional
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,16 +25,20 @@ class Settings(BaseSettings):
     # Gemini
     GEMINI_API_KEY: str
     GEMINI_MODEL: str = "gemini-1.5-flash"
-    TELEGRAM_BOT_TOKEN: str
+    # Optional integrations
+    ENABLE_TELEGRAM: bool = False
+    TELEGRAM_BOT_TOKEN: Optional[str] = None
 
     # Groq STT
-    GROQ_API_KEY: str
+    ENABLE_STT: bool = False
+    GROQ_API_KEY: Optional[str] = None
     GROQ_STT_MODEL: str = "whisper-large-v3"
 
     # ElevenLabs TTS
-    ELEVENLABS_API_KEY: str
-    ELEVENLABS_VOICE_ID: str
-    ELEVENLABS_MODEL_ID: str
+    ENABLE_TTS: bool = False
+    ELEVENLABS_API_KEY: Optional[str] = None
+    ELEVENLABS_VOICE_ID: Optional[str] = None
+    ELEVENLABS_MODEL_ID: Optional[str] = None
 
     # Laravel backend integration
     LARAVEL_BACKEND_URL: str
@@ -70,9 +75,6 @@ class Settings(BaseSettings):
 
     @field_validator(
         "GEMINI_API_KEY",
-        "TELEGRAM_BOT_TOKEN",
-        "GROQ_API_KEY",
-        "ELEVENLABS_API_KEY",
         "WEBSOCKET_AUTH_SECRET",
     )
     @classmethod
@@ -81,6 +83,17 @@ class Settings(BaseSettings):
         if not v or not v.strip():
             raise ValueError("Secret must not be blank")
         return v
+
+    @model_validator(mode="after")
+    def validate_optional_integrations(self):
+        """Validate that optional integrations have their required keys when enabled."""
+        if self.ENABLE_TELEGRAM and (not self.TELEGRAM_BOT_TOKEN or not self.TELEGRAM_BOT_TOKEN.strip()):
+            raise ValueError("TELEGRAM enabled but TELEGRAM_BOT_TOKEN is missing")
+        if self.ENABLE_STT and (not self.GROQ_API_KEY or not self.GROQ_API_KEY.strip()):
+            raise ValueError("STT enabled but GROQ_API_KEY is missing")
+        if self.ENABLE_TTS and (not self.ELEVENLABS_API_KEY or not self.ELEVENLABS_API_KEY.strip()):
+            raise ValueError("TTS enabled but ELEVENLABS_API_KEY is missing")
+        return self
 
     @property
     def cart_update_url(self) -> str:
@@ -97,6 +110,7 @@ class Settings(BaseSettings):
         return f"{base}/{path}"
 
 
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Get application settings singleton."""
+    """Get application settings singleton cached for process lifetime."""
     return Settings()

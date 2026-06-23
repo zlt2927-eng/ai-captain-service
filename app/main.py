@@ -5,7 +5,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.telegram_bot import initialize_telegram_bot, shutdown_telegram_bot
+# Telegram integration is optional; initialize lazily during startup
 from app.api.websocket_endpoints import router as websocket_router
 from app.core.config import get_settings
 from app.core.logging import setup_logging
@@ -20,9 +20,13 @@ from app.services.tts_service import TTSService
 logger = logging.getLogger(__name__)
 
 
-def create_app() -> FastAPI:
-    """Create FastAPI application."""
-    settings = get_settings()
+def create_app(settings=None) -> FastAPI:
+    """Create FastAPI application.
+
+    Accept an optional `settings` object for tests to inject a controlled
+    configuration without relying on environment variables.
+    """
+    settings = settings or get_settings()
 
     app = FastAPI(
         title=settings.APP_NAME,
@@ -53,12 +57,29 @@ def create_app() -> FastAPI:
         await app.state.http_client.startup()
 
         app.state.session_service = SessionService(app.state.redis_client, settings.SESSION_TTL_SECONDS)
-        app.state.stt_service = STTService(app.state.http_client, settings)
-        app.state.tts_service = TTSService(app.state.http_client, settings)
+        # Optional services
+        if settings.ENABLE_STT:
+            app.state.stt_service = STTService(app.state.http_client, settings)
+        else:
+            app.state.stt_service = None
+
+        if settings.ENABLE_TTS:
+            app.state.tts_service = TTSService(app.state.http_client, settings)
+        else:
+            app.state.tts_service = None
         app.state.gemini_orchestrator = GeminiOrchestrator(settings, app.state.session_service, app.state.http_client)
         app.state.recovery_service = RecoveryService(settings, app.state.http_client, app.state.redis_client, app.state.session_service)
 
-        app.state.telegram_app = await initialize_telegram_bot(app)
+        # Initialize optional Telegram bot without failing startup
+        app.state.telegram_app = None
+        if settings.ENABLE_TELEGRAM:
+            try:
+                from app.api.telegram_bot import initialize_telegram_bot
+
+                app.state.telegram_app = await initialize_telegram_bot(app)
+            except Exception:
+                logger.exception("Failed to initialize Telegram bot; continuing without it")
+
         logger.info("All services initialized successfully")
 
     @app.on_event("shutdown")
@@ -66,7 +87,18 @@ def create_app() -> FastAPI:
         logger.info("Shutting down %s", settings.APP_NAME)
 
         if getattr(app.state, "telegram_app", None):
-            await shutdown_telegram_bot(app.state.telegram_app)
+            try:
+                from app.api.telegram_bot import shutdown_telegram_bot
+
+                await shutdown_telegram_bot(app.state.telegram_app)
+            except Exception:
+                logger.exception("Error shutting down Telegram bot")
+
+        if getattr(app.state, "recovery_service", None):
+            try:
+                await app.state.recovery_service.shutdown()
+            except Exception:
+                logger.exception("Error shutting down recovery service")
 
         if getattr(app.state, "http_client", None):
             await app.state.http_client.shutdown()

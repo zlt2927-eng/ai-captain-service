@@ -5,13 +5,14 @@ from typing import Any, Dict, Optional
 
 from app.infrastructure.http_client import HTTPClient, HTTPClientError
 from app.schemas.cart_schemas import CartAction, CartUpdatePayload, CartAddonSelection
-from app.core.config import get_settings
+from app.core.config import Settings
 
 logger = logging.getLogger(__name__)
 
 
 async def update_cart(
     http_client: HTTPClient,
+    settings: Settings,
     restaurant_id: str,
     session_id: str,
     action: str,
@@ -42,7 +43,6 @@ async def update_cart(
             }
         )
 
-        settings = get_settings()
         cart_url = settings.cart_update_url
 
         logger.info(

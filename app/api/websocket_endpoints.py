@@ -29,13 +29,12 @@ router = APIRouter()
 
 def _get_runtime_services(websocket: WebSocket):
     state = websocket.app.state
+    # Core required services
     required = [
         "settings",
         "redis_client",
         "http_client",
         "session_service",
-        "stt_service",
-        "tts_service",
         "gemini_orchestrator",
         "recovery_service",
     ]
@@ -43,11 +42,12 @@ def _get_runtime_services(websocket: WebSocket):
     if missing:
         raise RuntimeError(f"App state missing required services: {missing}")
 
+    # STT/TTS may be optional and can be None
     return (
         state.settings,
         state.session_service,
-        state.stt_service,
-        state.tts_service,
+        getattr(state, "stt_service", None),
+        getattr(state, "tts_service", None),
         state.gemini_orchestrator,
         state.recovery_service,
     )
@@ -120,6 +120,8 @@ async def websocket_captain(
 
             if message.type == "audio_chunk":
                 try:
+                    if not isinstance(message.audio_base64, str):
+                        raise ValueError("audio_base64 must be a string")
                     chunk_bytes = base64.b64decode(message.audio_base64)
                 except Exception:
                     await websocket.send_text(make_error("Invalid audio chunk").model_dump_json())
@@ -142,8 +144,10 @@ async def websocket_captain(
                 if not audio_buffer:
                     await websocket.send_text(make_error("No audio to transcribe").model_dump_json())
                     continue
-
-                await _handle_audio_end_message(
+                if not stt_service:
+                    await websocket.send_text(make_error("Speech-to-text not enabled").model_dump_json())
+                else:
+                    await _handle_audio_end_message(
                     websocket,
                     log_ctx,
                     restaurant_id,
@@ -154,7 +158,7 @@ async def websocket_captain(
                     session_service,
                     stt_service,
                     tts_service,
-                )
+                    )
                 audio_buffer.clear()
                 audio_mime_type = "audio/wav"
                 continue
@@ -199,7 +203,10 @@ async def _handle_text_message(
             await websocket.send_text(make_cart_updated(cart_event).model_dump_json())
             log_ctx.info("Sent cart event")
 
-        await _stream_tts_response(websocket, assistant_text, tts_service)
+        if tts_service:
+            await _stream_tts_response(websocket, assistant_text, tts_service)
+        else:
+            log_ctx.info("TTS disabled; skipping audio response")
     except Exception:
         log_ctx.error("Text handler failed", exc_info=True)
         await websocket.send_text(make_error("Processing failed").model_dump_json())

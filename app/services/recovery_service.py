@@ -40,20 +40,16 @@ class RecoveryService:
             restaurant_id, session_id, self._settings.RECOVERY_DELAY_SECONDS
         )
         if not created:
-            logger.info("Recovery already scheduled", restaurant_id=restaurant_id, session_id=session_id)
+            logger.info("Recovery already scheduled for %s %s", restaurant_id, session_id)
             return
 
         task_key = self._task_key(restaurant_id, session_id)
         task = self._scheduled_tasks.get(task_key)
         if task is not None and not task.done():
-            logger.info(
-                "Recovery task already running", restaurant_id=restaurant_id, session_id=session_id
-            )
+            logger.info("Recovery task already running for %s %s", restaurant_id, session_id)
             return
 
-        logger.info(
-            "Scheduled recovery task", restaurant_id=restaurant_id, session_id=session_id
-        )
+        logger.info("Scheduled recovery task for %s %s", restaurant_id, session_id)
         self._scheduled_tasks[task_key] = asyncio.create_task(
             self._execute_recovery_if_abandoned(restaurant_id, session_id)
         )
@@ -65,11 +61,11 @@ class RecoveryService:
 
             has_marker = await self._redis.check_recovery_marker(restaurant_id, session_id)
             if not has_marker:
-                logger.info("Recovery marker cleared before execution", restaurant_id=restaurant_id, session_id=session_id)
+                logger.info("Recovery marker cleared before execution for %s %s", restaurant_id, session_id)
                 return
 
             if await self._session_service.is_session_active(restaurant_id, session_id):
-                logger.info("Session reactivated, aborting recovery", restaurant_id=restaurant_id, session_id=session_id)
+                logger.info("Session reactivated, aborting recovery for %s %s", restaurant_id, session_id)
                 await self._redis.cancel_recovery_marker(restaurant_id, session_id)
                 return
 
@@ -98,7 +94,7 @@ class RecoveryService:
         try:
             await self._http_client.post_json(self._settings.abandoned_cart_url, payload)
         except HTTPClientError as exc:
-            logger.error("Failed to send abandoned cart webhook", exc_info=True)
+            logger.error("Failed to send abandoned cart webhook: %s", str(exc), exc_info=True)
             raise RecoveryServiceError(str(exc)) from exc
 
     async def cancel_recovery(self, restaurant_id: str, session_id: str) -> None:
@@ -106,6 +102,25 @@ class RecoveryService:
         task = self._scheduled_tasks.get(task_key)
         if task and not task.done():
             task.cancel()
-            logger.info("Canceled in-process recovery task", restaurant_id=restaurant_id, session_id=session_id)
+            logger.info("Canceled in-process recovery task for %s %s", restaurant_id, session_id)
         await self._redis.cancel_recovery_marker(restaurant_id, session_id)
         self._scheduled_tasks.pop(task_key, None)
+
+    async def shutdown(self) -> None:
+        """Cancel all scheduled recovery tasks. Should be called during application shutdown."""
+        keys = list(self._scheduled_tasks.keys())
+        for key in keys:
+            task = self._scheduled_tasks.get(key)
+            if task and not task.done():
+                task.cancel()
+                logger.info("Canceled recovery task during shutdown: %s", key)
+        # Optionally await tasks to finish cancellation
+        for key in keys:
+            task = self._scheduled_tasks.pop(key, None)
+            if task:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.exception("Error while awaiting recovery task cancellation")
