@@ -7,7 +7,7 @@ from typing import Optional
 from app.websocket.connection_context import ConnectionContext
 from app.websocket.audio_buffer_service import AudioBufferService
 from app.websocket.response_sender import ResponseSender
-from app.schemas.websocket_schemas import IncomingMessage, MessageType
+from app.schemas.websocket_schemas import IncomingMessage, MessageType, make_offer_applied
 from app.services.gemini_orchestrator import GeminiOrchestrator
 from app.services.session_service import SessionService
 from app.services.stt_service import STTService
@@ -88,6 +88,22 @@ class TextMessageHandler:
             for cart_event in cart_events:
                 await self._sender.send_cart_update(cart_event)
                 logger.info("Sent cart event", extra=log_ctx)
+            
+            # Check for offer code application
+            tool_results = result.get("tool_results", [])
+            for tool_result in tool_results:
+                if tool_result.get("tool") == "validate_offer_code":
+                    tool_data = tool_result.get("result", {})
+                    if tool_data.get("valid"):
+                        await self._sender.send_raw(
+                            make_offer_applied({
+                                "code": tool_data.get("code"),
+                                "discount_type": tool_data.get("discount_type"),
+                                "discount_value": tool_data.get("discount_value"),
+                                "discount_amount": tool_data.get("discount_amount"),
+                            }).model_dump_json()
+                        )
+                        logger.info("Sent offer applied event", extra=log_ctx)
             
             # Stream TTS if available
             if self._tts_service:

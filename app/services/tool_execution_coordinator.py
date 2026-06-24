@@ -62,8 +62,12 @@ class ToolExecutionCoordinator:
         try:
             logger.info("Executing tool", extra=log_ctx)
             
+            # Inject turn_id into arguments if not present
+            if "turn_id" not in arguments:
+                arguments["turn_id"] = turn_id
+            
             # Execute tool
-            result = await tool_callable(turn_id=turn_id, **arguments)
+            result = await tool_callable(**arguments)
             
             logger.info(
                 "Tool execution completed",

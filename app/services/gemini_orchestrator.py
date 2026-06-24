@@ -15,6 +15,7 @@ from app.services.menu_context_provider import MenuContextProvider, create_menu_
 from app.services.cart_backend_gateway import CartBackendGateway
 from app.services.tool_execution_coordinator import ToolExecutionCoordinator
 from app.infrastructure.http_client import HTTPClient
+from app.infrastructure.redis_client import RedisClient
 
 logger = logging.getLogger(__name__)
 
@@ -39,20 +40,32 @@ class GeminiOrchestrator:
         settings: Settings,
         session_service: SessionService,
         http_client: HTTPClient,
+        redis_client: RedisClient,
     ) -> None:
         genai.configure(api_key=settings.GEMINI_API_KEY)
         self._settings = settings
         self._session_service = session_service
         self._http_client = http_client
+        self._redis_client = redis_client
         
         # Initialize decomposed components
         self._prompt_builder = PromptBuilder()
-        self._menu_provider = create_menu_context_provider(http_client, settings)
+        self._menu_provider = create_menu_context_provider(
+            http_client, 
+            redis_client, 
+            settings,
+            use_mock=not settings.ENABLE_REAL_MENU
+        )
         self._cart_gateway = CartBackendGateway(http_client, settings)
         self._tool_coordinator = ToolExecutionCoordinator(self._cart_gateway)
         
         # Register tools
         self._tool_coordinator.register_tool(TOOL_NAME_UPDATE_CART, self._create_cart_tool())
+        
+        # Register offer code tool if enabled
+        if settings.ENABLE_OFFER_CODES:
+            from app.tools.cart_tools import validate_offer_code
+            self._tool_coordinator.register_tool("validate_offer_code", self._create_offer_code_tool())
         
         # Construct GenerativeModel instance for reuse
         try:
@@ -85,6 +98,29 @@ class GeminiOrchestrator:
             )
         
         return cart_tool
+    
+    def _create_offer_code_tool(self):
+        """Create the offer code validation tool callable."""
+        from app.tools.cart_tools import validate_offer_code
+        
+        async def offer_code_tool(
+            turn_id: str,
+            restaurant_id: str,
+            session_id: str,
+            code: str,
+            subtotal: float,
+        ) -> dict:
+            """Validate offer code tool - delegates to gateway."""
+            return await validate_offer_code(
+                cart_gateway=self._cart_gateway,
+                turn_id=turn_id,
+                restaurant_id=restaurant_id,
+                session_id=session_id,
+                code=code,
+                subtotal=subtotal,
+            )
+        
+        return offer_code_tool
     
     async def _retryable(self, coro, *args, max_retries: int = 3, base_delay: float = 0.8, **kwargs):
         """Generic retry wrapper for transient errors."""
@@ -176,6 +212,24 @@ class GeminiOrchestrator:
             }
         ]
         
+        # Add offer code tool if enabled
+        if self._settings.ENABLE_OFFER_CODES and "validate_offer_code" in self._tool_coordinator._tool_registry:
+            tools.append({
+                "name": "validate_offer_code",
+                "description": "التحقق من صحة كود الخصم وتطبيقه على السلة",
+                "callable": self._tool_coordinator._tool_registry["validate_offer_code"],
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "restaurant_id": {"type": "string"},
+                        "session_id": {"type": "string"},
+                        "code": {"type": "string"},
+                        "subtotal": {"type": "number"},
+                    },
+                    "required": ["restaurant_id", "session_id", "code", "subtotal"],
+                },
+            })
+        
         async def _send_message(chat, msg, temperature=0.2):
             return await chat.send_message_async(msg, temperature=temperature)
         
@@ -232,8 +286,9 @@ class GeminiOrchestrator:
                 })
                 
                 if tool_result.get("success"):
-                    result["cart_events"].append(tool_result.get("cart_event", {}))
-                    result["cart_snapshot"] = tool_result.get("cart", {})
+                    if func_name == TOOL_NAME_UPDATE_CART:
+                        result["cart_events"].append(tool_result.get("cart_event", {}))
+                        result["cart_snapshot"] = tool_result.get("cart", {})
                 
                 # Get follow-up from model
                 tool_message = {

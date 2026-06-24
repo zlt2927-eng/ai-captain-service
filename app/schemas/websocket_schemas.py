@@ -19,6 +19,7 @@ class MessageType(str, Enum):
     assistant_text = "assistant_text"
     assistant_audio_chunk = "assistant_audio_chunk"
     cart_updated = "cart_updated"
+    offer_applied = "offer_applied"
     error = "error"
     pong = "pong"
 
@@ -95,6 +96,13 @@ class CartUpdatedMessage(BaseModel):
     payload: dict = Field(..., description="Cart update payload")
 
 
+class OfferAppliedMessage(BaseModel):
+    """Offer code applied event."""
+
+    type: MessageType = Field(MessageType.offer_applied, literal=True)
+    payload: dict = Field(..., description="Offer application details")
+
+
 class ErrorMessage(BaseModel):
     """Error message."""
 
@@ -116,6 +124,7 @@ OutgoingMessage = (
     AssistantTextMessage
     | AssistantAudioChunkMessage
     | CartUpdatedMessage
+    | OfferAppliedMessage
     | ErrorMessage
     | PongMessage
 )
@@ -137,6 +146,11 @@ def make_assistant_audio_chunk(audio_base64: str, sequence: int) -> AssistantAud
 def make_cart_updated(payload: dict) -> CartUpdatedMessage:
     """Create cart updated message."""
     return CartUpdatedMessage(payload=payload)
+
+
+def make_offer_applied(payload: dict) -> OfferAppliedMessage:
+    """Create offer applied message."""
+    return OfferAppliedMessage(payload=payload)
 
 
 def make_error(message: str) -> ErrorMessage:

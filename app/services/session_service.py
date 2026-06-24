@@ -19,6 +19,7 @@ class SessionService:
     - Conversation history tracking
     - Atomic multi-key operations via Redis pipeline
     - Recovery payload building
+    - Order linking (Problem 3 fix)
     """
     
     def __init__(self, redis_client: RedisClient, session_ttl_seconds: int):
@@ -252,3 +253,64 @@ class SessionService:
             "cart_snapshot": context.get("cart_snapshot", {}),
             "disconnected_at": datetime.now(timezone.utc).isoformat(),
         }
+    
+    # Problem 3: Session-order linking
+    
+    async def link_order_to_session(
+        self,
+        restaurant_id: str,
+        session_id: str,
+        order_id: int,
+    ) -> None:
+        """Link an order to a session after checkout.
+        
+        Args:
+            restaurant_id: Restaurant identifier
+            session_id: Session identifier
+            order_id: Laravel order ID
+        """
+        # Store order_id in Redis
+        order_key = f"captain:order:{restaurant_id}:{session_id}"
+        client = await self._redis._ensure_client()
+        await client.setex(
+            order_key,
+            self._session_ttl,
+            str(order_id)
+        )
+        
+        # Also update session metadata
+        metadata = await self._redis.load_session_state(restaurant_id, session_id) or {}
+        metadata["order_id"] = order_id
+        metadata["order_linked_at"] = datetime.now(timezone.utc).isoformat()
+        await self._redis.save_session_state(restaurant_id, session_id, metadata, self._session_ttl)
+        
+        logger.info(
+            "Order linked to session",
+            extra={
+                "restaurant_id": restaurant_id,
+                "session_id": session_id,
+                "order_id": order_id,
+            }
+        )
+    
+    async def get_linked_order(self, restaurant_id: str, session_id: str) -> Optional[int]:
+        """Get order ID linked to session.
+        
+        Args:
+            restaurant_id: Restaurant identifier
+            session_id: Session identifier
+            
+        Returns:
+            Order ID or None if not linked
+        """
+        order_key = f"captain:order:{restaurant_id}:{session_id}"
+        client = await self._redis._ensure_client()
+        order_id_str = await client.get(order_key)
+        
+        if order_id_str:
+            try:
+                return int(order_id_str)
+            except ValueError:
+                return None
+        
+        return None

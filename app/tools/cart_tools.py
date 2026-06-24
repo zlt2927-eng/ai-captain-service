@@ -23,7 +23,7 @@ async def update_cart(
     """Update user's cart via CartBackendGateway.
     
     This tool is now a thin wrapper around the CartBackendGateway,
-    which handles idempotency, HTTP communication, and error handling.
+    which handles idempotency, HTTP communication, validation, and error handling.
     
     Args:
         cart_gateway: Cart backend gateway instance
@@ -60,7 +60,7 @@ async def update_cart(
             }
         )
         
-        # Delegate to gateway (handles idempotency, HTTP, etc.)
+        # Delegate to gateway (handles idempotency, validation, HTTP, etc.)
         result = await cart_gateway.update_cart(
             session_id=session_id,
             turn_id=turn_id,
@@ -79,6 +79,7 @@ async def update_cart(
             "cart": result.get("cart", {}),
             "cart_event": result.get("cart_event", {}),
             "error": result.get("error"),
+            "error_code": result.get("error_code"),
             "idempotency_key": result.get("idempotency_key"),
         }
         
@@ -88,3 +89,94 @@ async def update_cart(
             "success": False,
             "error": str(exc),
         }
+
+
+async def validate_offer_code(
+    cart_gateway: CartBackendGateway,
+    turn_id: str,
+    restaurant_id: str,
+    session_id: str,
+    code: str,
+    subtotal: float,
+) -> dict:
+    """Validate offer/promo code against cart subtotal.
+    
+    Args:
+        cart_gateway: Cart backend gateway instance
+        turn_id: Turn identifier for correlation
+        restaurant_id: Restaurant identifier
+        session_id: Session identifier
+        code: Offer code to validate
+        subtotal: Cart subtotal before discount
+        
+    Returns:
+        Validation result with discount details
+    """
+    try:
+        logger.info(
+            "Validating offer code via tool",
+            extra={
+                "turn_id": turn_id,
+                "restaurant_id": restaurant_id,
+                "session_id": session_id,
+                "offer_code": code,
+                "subtotal": subtotal,
+            }
+        )
+        
+        result = await cart_gateway.validate_offer_code(
+            restaurant_id=restaurant_id,
+            session_id=session_id,
+            turn_id=turn_id,
+            code=code,
+            subtotal=subtotal,
+        )
+        
+        return {
+            "valid": result.get("valid", False),
+            "discount_type": result.get("discount_type"),
+            "discount_value": result.get("discount_value"),
+            "discount_amount": result.get("discount_amount"),
+            "message": result.get("message", "Offer code validated"),
+            "error": result.get("error"),
+        }
+        
+    except Exception as exc:
+        logger.error("Offer code validation failed", exc_info=True)
+        return {
+            "valid": False,
+            "error": str(exc),
+        }
+
+
+async def get_session_order(
+    cart_gateway: CartBackendGateway,
+    restaurant_id: str,
+    session_id: str,
+) -> dict:
+    """Get order linked to session.
+    
+    Args:
+        cart_gateway: Cart backend gateway instance
+        restaurant_id: Restaurant identifier
+        session_id: Session identifier
+        
+    Returns:
+        Order data or empty dict if not found
+    """
+    try:
+        logger.info(
+            "Fetching session order",
+            extra={"restaurant_id": restaurant_id, "session_id": session_id}
+        )
+        
+        result = await cart_gateway.get_session_order(
+            restaurant_id=restaurant_id,
+            session_id=session_id,
+        )
+        
+        return result
+        
+    except Exception as exc:
+        logger.error("Session order fetch failed", exc_info=True)
+        return {}

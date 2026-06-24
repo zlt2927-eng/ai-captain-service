@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     ENABLE_STT: bool = False
     ENABLE_RECOVERY: bool = False
 
+    # New business logic feature flags
+    ENABLE_OFFER_CODES: bool = False
+    ENABLE_REAL_MENU: bool = False
+
     # Gemini
     GEMINI_API_KEY: str
     GEMINI_MODEL: str = "gemini-1.5-flash"

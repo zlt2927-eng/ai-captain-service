@@ -102,8 +102,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.session_service = SessionService(app.state.redis_client, settings.SESSION_TTL_SECONDS)
     log_ctx.info("Session service initialized")
 
+    # Pass redis_client to orchestrator for menu caching
     app.state.gemini_orchestrator = GeminiOrchestrator(
-        settings, app.state.session_service, app.state.http_client
+        settings, 
+        app.state.session_service, 
+        app.state.http_client,
+        app.state.redis_client  # Pass Redis for menu caching
     )
     log_ctx.info("Gemini orchestrator initialized")
 
