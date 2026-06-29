@@ -106,25 +106,3 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text("تم استلام ردك. شكراً لك.")
 
 
-async def initialize_telegram_bot(app: FastAPI) -> Application:
-    settings: Settings = app.state.settings
-    telegram_app = create_telegram_application(settings)
-
-    telegram_app.bot_data["settings"] = settings
-    telegram_app.bot_data["http_client"] = app.state.http_client
-    telegram_app.bot_data["session_service"] = app.state.session_service
-    telegram_app.bot_data["gemini_orchestrator"] = app.state.gemini_orchestrator
-
-    await telegram_app.initialize()
-    await telegram_app.start()
-    await telegram_app.updater.start_polling()
-
-    logger.info("Telegram bot polling started")
-    return telegram_app
-
-
-async def shutdown_telegram_bot(telegram_app: Application) -> None:
-    await telegram_app.updater.stop_polling()
-    await telegram_app.stop()
-    await telegram_app.shutdown()
-    logger.info("Telegram bot polling stopped")

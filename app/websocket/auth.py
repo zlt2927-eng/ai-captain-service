@@ -9,6 +9,7 @@ from fastapi import WebSocket
 
 from app.core.config import Settings
 from app.core.constants import WS_CLOSE_UNAUTHORIZED
+from app.websocket.security import WebSocketSecurity
 
 logger = logging.getLogger(__name__)
 
@@ -25,14 +26,20 @@ class AuthResult:
 
 
 class WebSocketAuth:
-    """Handle WebSocket JWT authentication."""
+    """Handle WebSocket JWT authentication.
     
-    def __init__(self, settings: Settings):
+    Phase 14: Now delegates to WebSocketSecurity for enhanced validation.
+    """
+    
+    def __init__(self, settings: Settings, security: Optional[WebSocketSecurity] = None):
         self._settings = settings
+        self._security = security
     
     async def authenticate(self, websocket: WebSocket, token: str, 
                           expected_restaurant_id: str, expected_session_id: str) -> AuthResult:
         """Authenticate WebSocket connection using JWT token.
+        
+        Phase 14: Enhanced with WebSocketSecurity for comprehensive validation.
         
         Args:
             websocket: WebSocket connection
@@ -43,11 +50,27 @@ class WebSocketAuth:
         Returns:
             AuthResult with authentication outcome
         """
+        # Phase 14: Use WebSocketSecurity for enhanced JWT validation if available
+        if self._security:
+            security_result = await self._security.validate_jwt_token(token)
+            if not security_result.valid:
+                return AuthResult(
+                    success=False,
+                    error_reason=security_result.reason,
+                    close_code=security_result.close_code,
+                )
+        
         try:
+            # Decode JWT with strict algorithm validation to prevent "alg: none" attacks
+            # PyJWT will verify the algorithm matches the expected one
             payload = jwt.decode(
                 token,
                 self._settings.WEBSOCKET_AUTH_SECRET,
-                algorithms=[self._settings.WEBSOCKET_AUTH_ALGORITHM],
+                algorithms=self._settings.JWT_ALLOWED_ALGORITHMS,
+                options={
+                    "verify_alg": True,  # Ensure algorithm is explicitly verified
+                    "require": ["exp"],  # Require expiration claim
+                },
             )
             
             token_restaurant_id = payload.get("restaurant_id")

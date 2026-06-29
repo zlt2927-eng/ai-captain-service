@@ -1,4 +1,9 @@
-"""Gemini-based conversation orchestrator - decomposed architecture."""
+"""Gemini-based conversation orchestrator - decomposed architecture.
+
+Phase 10: All hardcoded values moved to config.
+Phase 11: Tool call validation via ToolCallValidator.
+Phase 18: Prompt management via PromptManager.
+"""
 
 import asyncio
 import json
@@ -11,11 +16,15 @@ from app.core.config import Settings
 from app.core.constants import TOOL_NAME_UPDATE_CART
 from app.services.session_service import SessionService
 from app.services.prompt_builder import PromptBuilder
+from app.services.prompt_manager import PromptManager
 from app.services.menu_context_provider import MenuContextProvider, create_menu_context_provider
 from app.services.cart_backend_gateway import CartBackendGateway
 from app.services.tool_execution_coordinator import ToolExecutionCoordinator
+from app.services.tool_call_validator import ToolCallValidator
 from app.infrastructure.http_client import HTTPClient
 from app.infrastructure.redis_client import RedisClient
+from app.infrastructure.retry_service import RetryService, RetryPolicy, CircuitBreakerOpenError
+from app.infrastructure.circuit_breaker import CircuitBreakerRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +59,8 @@ class GeminiOrchestrator:
         
         # Initialize decomposed components
         self._prompt_builder = PromptBuilder()
+        self._prompt_manager = PromptManager(settings)
+        self._tool_call_validator = ToolCallValidator(settings)
         self._menu_provider = create_menu_context_provider(
             http_client, 
             redis_client, 
@@ -57,7 +68,7 @@ class GeminiOrchestrator:
             use_mock=not settings.ENABLE_REAL_MENU
         )
         self._cart_gateway = CartBackendGateway(http_client, settings)
-        self._tool_coordinator = ToolExecutionCoordinator(self._cart_gateway)
+        self._tool_coordinator = ToolExecutionCoordinator(self._cart_gateway, self._tool_call_validator)
         
         # Register tools
         self._tool_coordinator.register_tool(TOOL_NAME_UPDATE_CART, self._create_cart_tool())
@@ -122,28 +133,45 @@ class GeminiOrchestrator:
         
         return offer_code_tool
     
-    async def _retryable(self, coro, *args, max_retries: int = 3, base_delay: float = 0.8, **kwargs):
-        """Generic retry wrapper for transient errors."""
-        for attempt in range(1, max_retries + 1):
-            try:
-                return await coro(*args, **kwargs)
-            except Exception as exc:
-                status_code = getattr(exc, "status_code", None)
-                msg = str(exc).lower()
-                is_rate_limit = status_code == 429 or "rate limit" in msg or "too many requests" in msg or "429" in msg
-                is_timeout = "timeout" in msg or "timed out" in msg
-                
-                if attempt == max_retries or not (is_rate_limit or is_timeout):
-                    logger.exception("Non-retriable or max retries reached for GenAI call")
-                    raise
-                
-                delay = base_delay * (2 ** (attempt - 1))
-                jitter = min(1.0, delay * 0.1)
-                sleep_for = max(0.5, delay + (jitter * (0.5 - __import__('random').random())))
-                logger.warning("Transient GenAI error, retrying in %.2fs (attempt %d): %s", sleep_for, attempt, exc)
-                await asyncio.sleep(sleep_for)
+    async def _retry_genai_call(self, callable, *args, **kwargs):
+        """Retry GenAI calls using RetryService with circuit breaker.
         
-        raise GeminiOrchestratorError("Retries exhausted")
+        Phase 10: All values from settings.
+        """
+        cb_config = self._settings.circuit_breaker_config
+        gemini_config = self._settings.gemini_config
+        
+        gemini_cb = CircuitBreakerRegistry().get_or_create(
+            name="gemini",
+            failure_threshold=cb_config.failure_threshold,
+            recovery_timeout=cb_config.recovery_timeout,
+            half_open_max_calls=cb_config.half_open_max_calls,
+        )
+        
+        retry_policy = RetryPolicy(
+            retryable_exceptions=(Exception,),  # Catch all for GenAI errors
+            retryable_status_codes=self._settings.retryable_status_codes_set,
+            max_attempts=gemini_config.max_retries,
+            base_delay=gemini_config.base_delay,
+            max_delay=gemini_config.max_delay,
+            jitter_factor=gemini_config.jitter_factor,
+        )
+        
+        retry_service = RetryService()
+        
+        try:
+            return await retry_service.execute(
+                callable,
+                args=args,
+                kwargs=kwargs,
+                policy=retry_policy,
+                circuit_breaker=gemini_cb,
+                operation_name="gemini_send_message",
+            )
+        except CircuitBreakerOpenError as exc:
+            raise GeminiOrchestratorError(f"Gemini service unavailable: {exc}") from exc
+        except Exception as exc:
+            raise GeminiOrchestratorError(f"Gemini call failed after retries: {exc}") from exc
     
     async def process_user_message(
         self,
@@ -191,11 +219,15 @@ class GeminiOrchestrator:
         }
         
         # Prepare tools for Gemini
+        update_cart_tool = self._tool_coordinator.get_tool(TOOL_NAME_UPDATE_CART)
+        if update_cart_tool is None:
+            raise GeminiOrchestratorError("Update cart tool not registered")
+        
         tools = [
             {
                 "name": TOOL_NAME_UPDATE_CART,
                 "description": "تحديث سلة المستخدم (إضافة/حذف/تعديل) للمطعم",
-                "callable": self._tool_coordinator._tool_registry[TOOL_NAME_UPDATE_CART],
+                "callable": update_cart_tool,
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -213,24 +245,28 @@ class GeminiOrchestrator:
         ]
         
         # Add offer code tool if enabled
-        if self._settings.ENABLE_OFFER_CODES and "validate_offer_code" in self._tool_coordinator._tool_registry:
-            tools.append({
-                "name": "validate_offer_code",
-                "description": "التحقق من صحة كود الخصم وتطبيقه على السلة",
-                "callable": self._tool_coordinator._tool_registry["validate_offer_code"],
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "restaurant_id": {"type": "string"},
-                        "session_id": {"type": "string"},
-                        "code": {"type": "string"},
-                        "subtotal": {"type": "number"},
+        if self._settings.ENABLE_OFFER_CODES and self._tool_coordinator.has_tool("validate_offer_code"):
+            validate_offer_tool = self._tool_coordinator.get_tool("validate_offer_code")
+            if validate_offer_tool is not None:
+                tools.append({
+                    "name": "validate_offer_code",
+                    "description": "التحقق من صحة كود الخصم وتطبيقه على السلة",
+                    "callable": validate_offer_tool,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "restaurant_id": {"type": "string"},
+                            "session_id": {"type": "string"},
+                            "code": {"type": "string"},
+                            "subtotal": {"type": "number"},
+                        },
+                        "required": ["restaurant_id", "session_id", "code", "subtotal"],
                     },
-                    "required": ["restaurant_id", "session_id", "code", "subtotal"],
-                },
-            })
+                })
         
-        async def _send_message(chat, msg, temperature=0.2):
+        gemini_cfg = self._settings.gemini_config
+
+        async def _send_message(chat, msg, temperature=gemini_cfg.default_temperature):
             return await chat.send_message_async(msg, temperature=temperature)
         
         try:
@@ -241,11 +277,11 @@ class GeminiOrchestrator:
                 chat = self._model.start_chat(history=history, tools=tools)
             
             # Send user message
-            response = await self._retryable(
+            response = await self._retry_genai_call(
                 _send_message,
                 chat,
                 {"role": "user", "content": user_message},
-                temperature=0.2
+                temperature=gemini_cfg.default_temperature
             )
             
             # Handle function call if present
@@ -296,7 +332,7 @@ class GeminiOrchestrator:
                     "name": func_name,
                     "content": json.dumps(tool_result, ensure_ascii=False)
                 }
-                followup = await self._retryable(_send_message, chat, tool_message, temperature=0.2)
+                followup = await self._retry_genai_call(_send_message, chat, tool_message, temperature=gemini_cfg.default_temperature)
                 
                 assistant_text = ""
                 if isinstance(followup, dict):

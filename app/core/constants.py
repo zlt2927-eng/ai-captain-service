@@ -1,5 +1,61 @@
-"""Application constants."""
+"""Application constants.
 
+Phase 10: All configurable values moved to config.py.
+Only truly constant values remain here.
+"""
+
+# Redis key prefixes (structural, not configurable)
+REDIS_SESSION_PREFIX = "captain:session"
+REDIS_CART_PREFIX = "captain:cart"
+REDIS_AUDIO_PREFIX = "captain:audio"
+REDIS_RECOVERY_PREFIX = "captain:recovery"
+REDIS_MENU_PREFIX = "captain:menu"
+REDIS_TURN_PREFIX = "turn"
+REDIS_ACTIVE_PREFIX = "captain:session:active"
+REDIS_LAST_USER_MSG_PREFIX = "captain:session:last_user_msg"
+REDIS_LAST_ASST_MSG_PREFIX = "captain:session:last_asst_msg"
+REDIS_ORDER_PREFIX = "captain:order"
+REDIS_TOKEN_REVOKED_PREFIX = "token:revoked"
+REDIS_AUDIO_CHUNK_PREFIX = "audio_chunk"
+REDIS_AUDIO_META_PREFIX = "audio_meta"
+REDIS_AUDIO_BUFFER_PREFIX = "audio_buffer"
+REDIS_SECURITY_CONNECTIONS_PREFIX = "security:connections"
+
+# Rendered key templates (for documentation / reuse)
+# Use these to build Redis keys consistently:
+#   f"{REDIS_SESSION_PREFIX}:{restaurant_id}:{session_id}"
+#   f"{REDIS_TURN_PREFIX}:{restaurant_id}:{session_id}:{turn_id}"
+
+# WebSocket close codes (RFC 6455 standard codes, not configurable)
+WS_CLOSE_NORMAL = 1000
+WS_CLOSE_GOING_AWAY = 1001
+WS_CLOSE_PROTOCOL_ERROR = 1002
+WS_CLOSE_UNSUPPORTED_DATA = 1003
+WS_CLOSE_INVALID_DATA = 1007       # Invalid payload data
+WS_CLOSE_POLICY_VIOLATION = 1008   # Policy violation (includes auth, rate limit)
+WS_CLOSE_MESSAGE_TOO_BIG = 1009    # Message too big
+WS_CLOSE_UNAUTHORIZED = 1008       # Policy violation for auth
+WS_CLOSE_RATE_LIMIT = 1008         # Policy violation for rate limit
+WS_CLOSE_PAYLOAD_TOO_LARGE = 1009  # Message too big
+
+# Tool names (used by registry, not configurable)
+TOOL_NAME_UPDATE_CART = "update_cart"
+TOOL_NAME_VALIDATE_OFFER_CODE = "validate_offer_code"
+
+# Standard error codes (used by backend gateway, not configurable)
+ERROR_CODE_UNKNOWN_TOOL = "UNKNOWN_TOOL"
+ERROR_CODE_VALIDATION_ERROR = "VALIDATION_ERROR"
+ERROR_CODE_INVALID_ADDON = "INVALID_ADDON"
+ERROR_CODE_DISH_NOT_AVAILABLE = "DISH_NOT_AVAILABLE"
+ERROR_CODE_DISH_NOT_FOUND = "DISH_NOT_FOUND"
+ERROR_CODE_CROSS_TENANT_VIOLATION = "CROSS_TENANT_VIOLATION"
+ERROR_CODE_PROCESSING_FAILED = "PROCESSING_FAILED"
+ERROR_CODE_AUTH_FAILED = "AUTH_FAILED"
+ERROR_CODE_MESSAGE_TOO_LARGE = "MESSAGE_TOO_LARGE"
+ERROR_CODE_INVALID_MESSAGE = "INVALID_MESSAGE"
+ERROR_CODE_RATE_LIMITED = "RATE_LIMITED"
+
+# System prompt (embedded prompt - will be replaced by PromptManager in Phase 18)
 CAPTAIN_SYSTEM_PROMPT = """You are an AI Digital Captain — a warm, efficient restaurant host and waiter for an interactive ordering experience.
 
 ## Core Responsibilities
@@ -48,24 +104,3 @@ You have access to:
 
 Now, provide warm, efficient, and personalized service in the user's language and dialect.
 """
-
-# Redis key prefixes
-REDIS_SESSION_PREFIX = "captain:session"
-REDIS_CART_PREFIX = "captain:cart"
-REDIS_AUDIO_PREFIX = "captain:audio"
-REDIS_RECOVERY_PREFIX = "captain:recovery"
-
-# WebSocket close codes
-WS_CLOSE_UNAUTHORIZED = 1008
-WS_CLOSE_NORMAL = 1000
-
-# Audio constraints
-MIN_AUDIO_CHUNK_BYTES = 100
-DEFAULT_AUDIO_CHUNK_SIZE = 8192
-
-# Tool names
-TOOL_NAME_UPDATE_CART = "update_cart"
-TOOL_NAME_VALIDATE_OFFER_CODE = "validate_offer_code"
-
-# Default response timeout
-DEFAULT_RESPONSE_TIMEOUT_SECONDS = 30

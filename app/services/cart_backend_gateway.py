@@ -8,6 +8,13 @@ from typing import Any, Dict, Optional
 
 from app.infrastructure.http_client import HTTPClient, HTTPClientError
 from app.core.config import Settings
+from app.core.constants import (
+    ERROR_CODE_INVALID_ADDON,
+    ERROR_CODE_DISH_NOT_AVAILABLE,
+    ERROR_CODE_DISH_NOT_FOUND,
+    ERROR_CODE_CROSS_TENANT_VIOLATION,
+    ERROR_CODE_VALIDATION_ERROR,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +115,7 @@ class CartBackendGateway:
                 return {
                     "success": False,
                     "error": validation_result["error"],
-                    "error_code": "INVALID_ADDON",
+                    "error_code": ERROR_CODE_INVALID_ADDON,
                     "invalid_addons": validation_result.get("invalid_addons", []),
                     "idempotency_key": idempotency_key,
                 }
@@ -157,7 +164,8 @@ class CartBackendGateway:
             )
             
             # Handle validation errors from Laravel
-            if result.get("error_code") in ("DISH_NOT_AVAILABLE", "DISH_NOT_FOUND", "CROSS_TENANT_VIOLATION"):
+            laravel_error_code = result.get("error_code", "")
+            if laravel_error_code in (ERROR_CODE_DISH_NOT_AVAILABLE, ERROR_CODE_DISH_NOT_FOUND, ERROR_CODE_CROSS_TENANT_VIOLATION, ERROR_CODE_INVALID_ADDON):
                 logger.warning(
                     "Dish validation failed",
                     extra={**log_ctx, "error": result.get("error")}
@@ -165,7 +173,7 @@ class CartBackendGateway:
                 return {
                     "success": False,
                     "error": result.get("message", "Dish validation failed"),
-                    "error_code": result.get("error_code"),
+                    "error_code": laravel_error_code,
                     "idempotency_key": idempotency_key,
                 }
             
@@ -194,7 +202,7 @@ class CartBackendGateway:
                 return {
                     "success": False,
                     "error": "Validation failed. Please check your order.",
-                    "error_code": "VALIDATION_ERROR",
+                    "error_code": ERROR_CODE_VALIDATION_ERROR,
                     "idempotency_key": idempotency_key,
                 }
             

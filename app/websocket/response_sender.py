@@ -4,7 +4,7 @@ import base64
 import logging
 from typing import Optional
 
-from fastapi import WebSocket
+from fastapi import WebSocket, WebSocketDisconnect
 
 from app.schemas.websocket_schemas import (
     make_assistant_audio_chunk,
@@ -29,48 +29,123 @@ class ResponseSender:
         self._connection_id = connection_id
     
     async def send_text(self, text: str) -> None:
-        """Send assistant text response."""
-        await self._websocket.send_text(make_assistant_text(text).model_dump_json())
-        logger.debug(
-            "Sent assistant text",
-            extra={"connection_id": self._connection_id, "text_length": len(text)}
-        )
+        """Send assistant text response.
+        
+        Args:
+            text: Assistant response text
+        """
+        try:
+            await self._websocket.send_text(make_assistant_text(text).model_dump_json())
+            logger.debug(
+                "Sent assistant text",
+                extra={"connection_id": self._connection_id, "text_length": len(text)}
+            )
+        except WebSocketDisconnect:
+            logger.debug("Client disconnected during text send", extra={"connection_id": self._connection_id})
+        except RuntimeError as exc:
+            logger.warning(
+                "WebSocket send failed",
+                exc_info=exc,
+                extra={"connection_id": self._connection_id, "type": "text"}
+            )
     
     async def send_audio_chunk(self, audio_base64: str, sequence: int) -> None:
-        """Send audio chunk for TTS streaming."""
-        await self._websocket.send_text(
-            make_assistant_audio_chunk(audio_base64, sequence).model_dump_json()
-        )
-        logger.debug(
-            "Sent audio chunk",
-            extra={"connection_id": self._connection_id, "sequence": sequence}
-        )
+        """Send audio chunk for TTS streaming.
+        
+        Args:
+            audio_base64: Base64-encoded audio data
+            sequence: Chunk sequence number
+        """
+        try:
+            await self._websocket.send_text(
+                make_assistant_audio_chunk(audio_base64, sequence).model_dump_json()
+            )
+            logger.debug(
+                "Sent audio chunk",
+                extra={"connection_id": self._connection_id, "sequence": sequence}
+            )
+        except WebSocketDisconnect:
+            logger.debug("Client disconnected during audio chunk send", extra={"connection_id": self._connection_id})
+        except RuntimeError as exc:
+            logger.warning(
+                "WebSocket send failed",
+                exc_info=exc,
+                extra={"connection_id": self._connection_id, "type": "audio_chunk", "sequence": sequence}
+            )
     
     async def send_cart_update(self, payload: dict) -> None:
-        """Send cart update event."""
-        await self._websocket.send_text(make_cart_updated(payload).model_dump_json())
-        logger.debug(
-            "Sent cart update",
-            extra={"connection_id": self._connection_id}
-        )
+        """Send cart update event.
+        
+        Args:
+            payload: Cart update payload
+        """
+        try:
+            await self._websocket.send_text(make_cart_updated(payload).model_dump_json())
+            logger.debug(
+                "Sent cart update",
+                extra={"connection_id": self._connection_id}
+            )
+        except WebSocketDisconnect:
+            logger.debug("Client disconnected during cart update send", extra={"connection_id": self._connection_id})
+        except RuntimeError as exc:
+            logger.warning(
+                "WebSocket send failed",
+                exc_info=exc,
+                extra={"connection_id": self._connection_id, "type": "cart_update"}
+            )
     
     async def send_error(self, message: str) -> None:
-        """Send error message."""
-        await self._websocket.send_text(make_error(message).model_dump_json())
-        logger.warning(
-            "Sent error to client",
-            extra={"connection_id": self._connection_id, "error": message}
-        )
+        """Send error message.
+        
+        Args:
+            message: Error message to send
+        """
+        try:
+            await self._websocket.send_text(make_error(message).model_dump_json())
+            logger.warning(
+                "Sent error to client",
+                extra={"connection_id": self._connection_id, "error": message}
+            )
+        except WebSocketDisconnect:
+            logger.debug("Client disconnected during error send", extra={"connection_id": self._connection_id})
+        except RuntimeError as exc:
+            logger.warning(
+                "WebSocket error send failed",
+                exc_info=exc,
+                extra={"connection_id": self._connection_id, "error": message}
+            )
     
     async def send_pong(self) -> None:
         """Send pong response."""
-        await self._websocket.send_text(make_pong().model_dump_json())
-        logger.debug("Sent pong", extra={"connection_id": self._connection_id})
+        try:
+            await self._websocket.send_text(make_pong().model_dump_json())
+            logger.debug("Sent pong", extra={"connection_id": self._connection_id})
+        except WebSocketDisconnect:
+            logger.debug("Client disconnected during pong send", extra={"connection_id": self._connection_id})
+        except RuntimeError as exc:
+            logger.warning(
+                "WebSocket pong send failed",
+                exc_info=exc,
+                extra={"connection_id": self._connection_id}
+            )
     
     async def send_raw(self, message: str) -> None:
-        """Send raw JSON message."""
-        await self._websocket.send_text(message)
-        logger.debug(
-            "Sent raw message",
-            extra={"connection_id": self._connection_id, "message_length": len(message)}
-        )
+        """Send raw JSON message.
+        
+        Args:
+            message: Raw JSON string to send
+        """
+        try:
+            await self._websocket.send_text(message)
+            logger.debug(
+                "Sent raw message",
+                extra={"connection_id": self._connection_id, "message_length": len(message)}
+            )
+        except WebSocketDisconnect:
+            logger.debug("Client disconnected during raw message send", extra={"connection_id": self._connection_id})
+        except RuntimeError as exc:
+            logger.warning(
+                "WebSocket raw send failed",
+                exc_info=exc,
+                extra={"connection_id": self._connection_id, "message_length": len(message)}
+            )

@@ -20,7 +20,7 @@ isort==5.13.2
 
 # Type stubs
 types-redis==4.6.0
-types-PyJWT==1.7.3
+types-PyJWT==1.7.1
 
 # Debugging
 ipython==8.29.0

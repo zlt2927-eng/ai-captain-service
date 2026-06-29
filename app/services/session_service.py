@@ -269,7 +269,7 @@ class SessionService:
             session_id: Session identifier
             order_id: Laravel order ID
         """
-        # Store order_id in Redis
+        # Store order_id in Redis using public API
         order_key = f"captain:order:{restaurant_id}:{session_id}"
         client = await self._redis._ensure_client()
         await client.setex(

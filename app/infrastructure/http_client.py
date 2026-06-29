@@ -1,14 +1,26 @@
-"""Reusable async HTTP client with retry logic and structured logging."""
+"""Reusable async HTTP client with circuit breaker and retry logic.
 
-import asyncio
+Uses RetryService for exponential backoff / jitter / retry policies and
+CircuitBreaker for preventing cascading failures to external services.
+"""
+
 import json
 import logging
 import time
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
 
 import httpx
 
 from app.core.config import Settings
+from app.infrastructure.circuit_breaker import (
+    CircuitBreaker,
+    CircuitBreakerRegistry,
+)
+from app.infrastructure.retry_service import (
+    CircuitBreakerOpenError,
+    RetryPolicy,
+    RetryService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -17,14 +29,32 @@ class HTTPClientError(Exception):
     """Custom HTTP client error."""
 
 
+class HTTPStatusError(Exception):
+    """HTTP status code error for triggering retry logic.
+
+    Carries the status code so RetryService can evaluate retryability.
+    """
+    def __init__(self, status_code: int, body: str):
+        self.status_code = status_code
+        self.body = body
+        super().__init__(f"HTTP {status_code}: {body[:200]}")
+
+
 class HTTPClient:
-    """Async HTTP client wrapper with retries and structured error handling."""
+    """Async HTTP client wrapper with circuit breaker and structured error handling.
+
+    Uses RetryService for exponential backoff with jitter and configurable
+    retry policies. Integrates CircuitBreaker for all external services
+    to prevent cascading failures.
+    """
 
     IDEMPOTENT_METHODS = {"GET", "HEAD", "OPTIONS"}
 
     def __init__(self, settings: Settings):
         self._settings = settings
         self._client: Optional[httpx.AsyncClient] = None
+        self._retry_service = RetryService()
+        self._circuit_breakers = CircuitBreakerRegistry()
 
     async def _ensure_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -78,13 +108,44 @@ class HTTPClient:
             fields["latency_ms"] = round(latency_ms, 2)
         return fields
 
-    async def _sleep_backoff(self, attempt: int) -> None:
-        """Exponential backoff with jitter for retry delays."""
-        base_delay = self._settings.HTTP_BACKOFF_BASE_SECONDS
-        delay = base_delay * (2 ** attempt)
-        jitter = delay * 0.1 * (2 * (await asyncio.to_thread(__import__('random').random) - 0.5))
-        sleep_for = max(0.1, delay + jitter)
-        await asyncio.sleep(sleep_for)
+    def _get_circuit_breaker(self, service_name: Optional[str]) -> Optional[CircuitBreaker]:
+        """Get or create circuit breaker for a service."""
+        if not service_name:
+            return None
+        return self._circuit_breakers.get_or_create(
+            name=service_name,
+            failure_threshold=self._settings.HTTP_MAX_RETRIES + 2,
+            recovery_timeout=30.0,
+            half_open_max_calls=3,
+        )
+
+    def _get_retry_policy(self, method_upper: str, retry_on_server_error: bool) -> RetryPolicy:
+        """Get retry policy based on HTTP method and settings.
+
+        Args:
+            method_upper: Uppercase HTTP method
+            retry_on_server_error: Force retry on 5xx for non-idempotent methods
+
+        Returns:
+            Configured RetryPolicy
+        """
+        retryable_server_error = retry_on_server_error or method_upper in self.IDEMPOTENT_METHODS
+
+        if not retryable_server_error:
+            # For non-idempotent writes, only retry on transient network errors
+            return RetryPolicy(
+                retryable_exceptions=(httpx.TimeoutException, httpx.NetworkError, ConnectionError, TimeoutError, OSError),
+                retryable_status_codes={429},  # Only retry rate limits
+                max_attempts=self._settings.HTTP_MAX_RETRIES,
+                base_delay=self._settings.HTTP_BACKOFF_BASE_SECONDS,
+            )
+
+        return RetryPolicy(
+            retryable_exceptions=(httpx.TimeoutException, httpx.NetworkError, ConnectionError, TimeoutError, OSError),
+            retryable_status_codes={429, 500, 502, 503, 504},
+            max_attempts=self._settings.HTTP_MAX_RETRIES,
+            base_delay=self._settings.HTTP_BACKOFF_BASE_SECONDS,
+        )
 
     async def request(
         self,
@@ -100,8 +161,8 @@ class HTTPClient:
         correlation_id: Optional[str] = None,
         retry_on_server_error: bool = False,
     ) -> httpx.Response:
-        """Execute HTTP request with retry logic and structured logging.
-        
+        """Execute HTTP request with circuit breaker and retry logic.
+
         Args:
             method: HTTP method (GET, POST, etc.)
             url: Target URL
@@ -110,110 +171,74 @@ class HTTPClient:
             json_data: Optional JSON payload
             files: Optional multipart files
             data: Optional form data
-            service_name: Target service name for logging
+            service_name: Target service name for logging/metrics/circuit breaker
             endpoint_name: Endpoint name for logging
             correlation_id: Correlation ID for request tracing
             retry_on_server_error: Force retry on 5xx even for non-idempotent methods
-            
+
         Returns:
             httpx.Response object
-            
+
         Raises:
-            HTTPClientError: If request fails after all retries
+            HTTPClientError: If request fails after all retries or circuit is open
         """
         client = await self._ensure_client()
         headers = dict(headers or {})
         method_upper = method.upper()
-        
-        # Only retry 5xx for idempotent methods unless explicitly enabled
-        retryable_server_error = retry_on_server_error or method_upper in self.IDEMPOTENT_METHODS
 
-        for attempt in range(self._settings.HTTP_MAX_RETRIES):
+        circuit_breaker = self._get_circuit_breaker(service_name)
+        retry_policy = self._get_retry_policy(method_upper, retry_on_server_error)
+
+        async def _make_request() -> httpx.Response:
             start_time = time.perf_counter()
-            try:
-                response = await client.request(
-                    method_upper,
-                    url,
-                    headers=headers,
-                    params=params,
-                    json=json_data,
-                    files=files,
-                    data=data,
-                )
-                latency_ms = (time.perf_counter() - start_time) * 1000
+            response = await client.request(
+                method_upper,
+                url,
+                headers=headers,
+                params=params,
+                json=json_data,
+                files=files,
+                data=data,
+            )
+            latency_ms = (time.perf_counter() - start_time) * 1000
 
-                # Log successful request
-                logger.info(
-                    "HTTP request completed",
-                    extra=self._log_fields(
-                        method=method_upper,
-                        url=url,
-                        status_code=response.status_code,
-                        attempt=attempt + 1,
-                        service_name=service_name,
-                        endpoint_name=endpoint_name,
-                        correlation_id=correlation_id,
-                        latency_ms=latency_ms,
-                    ),
-                )
+            logger.info(
+                "HTTP request completed",
+                extra=self._log_fields(
+                    method=method_upper,
+                    url=url,
+                    status_code=response.status_code,
+                    attempt=None,  # Tracked by retry service
+                    service_name=service_name,
+                    endpoint_name=endpoint_name,
+                    correlation_id=correlation_id,
+                    latency_ms=latency_ms,
+                ),
+            )
 
-                # Retry on server errors for idempotent methods
-                if response.status_code >= 500 and retryable_server_error and attempt < self._settings.HTTP_MAX_RETRIES - 1:
-                    logger.warning(
-                        "HTTP request retrying due to server error",
-                        extra=self._log_fields(
-                            method=method_upper,
-                            url=url,
-                            status_code=response.status_code,
-                            attempt=attempt + 1,
-                            service_name=service_name,
-                            endpoint_name=endpoint_name,
-                            correlation_id=correlation_id,
-                            latency_ms=latency_ms,
-                        ),
-                    )
-                    await self._sleep_backoff(attempt)
-                    continue
-                    
-                return response
-                
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                latency_ms = (time.perf_counter() - start_time) * 1000
-                if attempt < self._settings.HTTP_MAX_RETRIES - 1:
-                    logger.warning(
-                        "HTTP request transient failure, retrying",
-                        extra=self._log_fields(
-                            method=method_upper,
-                            url=url,
-                            attempt=attempt + 1,
-                            service_name=service_name,
-                            endpoint_name=endpoint_name,
-                            correlation_id=correlation_id,
-                            latency_ms=latency_ms,
-                        ),
-                        exc_info=exc,
-                    )
-                    await self._sleep_backoff(attempt)
-                    continue
-                raise HTTPClientError(f"HTTP request failed after {attempt + 1} attempts: {exc}") from exc
-                
-            except Exception as exc:
-                latency_ms = (time.perf_counter() - start_time) * 1000
-                logger.error(
-                    "HTTP request failed unexpectedly",
-                    extra=self._log_fields(
-                        method=method_upper,
-                        url=url,
-                        service_name=service_name,
-                        endpoint_name=endpoint_name,
-                        correlation_id=correlation_id,
-                        latency_ms=latency_ms,
-                    ),
-                    exc_info=exc,
-                )
-                raise HTTPClientError(f"HTTP request failed: {exc}") from exc
+            # Raise for status codes that should trigger retry or fail
+            if response.status_code >= 400:
+                raise HTTPStatusError(response.status_code, response.text)
 
-        raise HTTPClientError(f"HTTP request exhausted retries: {method_upper} {url}")
+            return response
+
+        try:
+            return await self._retry_service.execute(
+                _make_request,
+                operation_name=endpoint_name or f"{method_upper}_{url[:50]}",
+                policy=retry_policy,
+                circuit_breaker=circuit_breaker,
+            )
+        except CircuitBreakerOpenError as exc:
+            raise HTTPClientError(f"Circuit breaker open: {exc}") from exc
+        except HTTPStatusError as exc:
+            raise HTTPClientError(
+                f"{method_upper} {url} returned {exc.status_code}: {exc.body}"
+            ) from exc
+        except Exception as exc:
+            if isinstance(exc, HTTPClientError):
+                raise
+            raise HTTPClientError(f"HTTP request failed: {exc}") from exc
 
     async def post_json(
         self,
@@ -226,19 +251,19 @@ class HTTPClient:
         retry_on_server_error: bool = False,
     ) -> dict:
         """Send POST request with JSON payload.
-        
+
         Args:
             url: Target URL
             json_data: JSON payload to send
             headers: Optional additional headers
-            service_name: Target service name for logging
+            service_name: Target service name for logging/circuit breaker
             endpoint_name: Endpoint name for logging
             correlation_id: Correlation ID for request tracing
             retry_on_server_error: Force retry on 5xx errors
-            
+
         Returns:
             Parsed JSON response
-            
+
         Raises:
             HTTPClientError: If request fails or returns error status
         """
@@ -255,12 +280,7 @@ class HTTPClient:
             correlation_id=correlation_id,
             retry_on_server_error=retry_on_server_error,
         )
-        
-        if response.status_code >= 400:
-            message = response.text
-            raise HTTPClientError(
-                f"POST {url} returned {response.status_code}: {message}"
-            )
+
         try:
             return response.json()
         except json.JSONDecodeError as exc:
@@ -276,18 +296,18 @@ class HTTPClient:
         correlation_id: Optional[str] = None,
     ) -> dict:
         """Send GET request and parse JSON response.
-        
+
         Args:
             url: Target URL
             headers: Optional additional headers
             params: Optional query parameters
-            service_name: Target service name for logging
+            service_name: Target service name for logging/circuit breaker
             endpoint_name: Endpoint name for logging
             correlation_id: Correlation ID for request tracing
-            
+
         Returns:
             Parsed JSON response
-            
+
         Raises:
             HTTPClientError: If request fails or returns error status
         """
@@ -301,11 +321,7 @@ class HTTPClient:
             correlation_id=correlation_id,
             retry_on_server_error=True,  # GET is idempotent, safe to retry
         )
-        
-        if response.status_code >= 400:
-            raise HTTPClientError(
-                f"GET {url} returned {response.status_code}: {response.text}"
-            )
+
         try:
             return response.json()
         except json.JSONDecodeError as exc:
@@ -318,16 +334,16 @@ class HTTPClient:
         headers: Optional[dict] = None,
         json_data: Optional[dict] = None,
         data: Optional[Any] = None,
-    ):
+    ) -> AsyncIterator[bytes]:
         """Stream HTTP response body as bytes.
-        
+
         Args:
             method: HTTP method
             url: Target URL
             headers: Optional request headers
             json_data: Optional JSON payload
             data: Optional form data
-            
+
         Yields:
             Response chunks as bytes
         """
